@@ -100,7 +100,7 @@ def main():
 
             elif selection == 13:
                 params = RadioFunctions.LoadParams(param_filename)
-                data = RadioFunctions.do_AMTGMscan_unsupervised(params)
+                angles, tgm_db = RadioFunctions.do_AMTGMscan_unsupervised(params)
                 print(data)
 
             elif selection == 14:
@@ -110,7 +110,7 @@ def main():
                 if not ref_file or not os.path.exists(ref_file):
                     print("Invalid reference file. Aborting.")
                 else:
-                    data = RadioFunctions.do_AMTGMscan_supervised(params, ref_file)
+                    angles, tgm_db = RadioFunctions.do_AMTGMscan_supervised(params, ref_file)
                     print(data)
 
 

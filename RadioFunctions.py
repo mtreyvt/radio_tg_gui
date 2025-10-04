@@ -925,5 +925,30 @@ def do_AMTGMscan_supervised(params, ref_file: str):
  
     return mast_angles.tolist(), tgm_db.tolist()
 
+def _ensure_tuple_result(res):
+    """
+    Accept:
+      - (angles, tgm_db)
+      - {"angles_deg": [...], "tgm_db": [...]}
+      - legacy: [(angle, arm, bg, value), ...]
+    Return: (angles_list, tgm_db_list)
+    """
+    if isinstance(res, tuple) and len(res) >= 2:
+        return res[0], res[1]
+    if isinstance(res, dict) and "angles_deg" in res and "tgm_db" in res:
+        return res["angles_deg"], res["tgm_db"]
+    if isinstance(res, list) and res and isinstance(res[0], (tuple, list)) and len(res[0]) >= 4:
+        angles = [row[0] for row in res]
+        mags   = [row[3] for row in res]
+        return angles, mags
+    raise TypeError("Unsupported result format for TGM scan")
+
+def do_AMTGMscan_unsupervised_legacy(params):
+    res = do_AMTGMscan_unsupervised(params)
+    return _ensure_tuple_result(res)
+
+def do_AMTGMscan_supervised_legacy(params, ref_file: str):
+    res = do_AMTGMscan_supervised(params, ref_file)
+    return _ensure_tuple_result(res)
 
 
