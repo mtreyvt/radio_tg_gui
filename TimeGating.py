@@ -144,3 +144,188 @@ def print_and_return_data(data):
     arr = np.asarray(data, dtype=float)
     print(f"[TimeGating] Data length: {arr.size}, dtype={arr.dtype}")
     return arr
+
+
+
+# ================NEW TGM ====================#
+#F25-05 Senior Design Team 
+
+def _next_pow2_ge(n: int, min_n: int = 256) -> int:
+    return new_pow2(max(min_n, n))
+
+def _tpos_auto_gate_from_data(freq_resp: np.ndarray,
+                              freq_list: np.ndarray, 
+                              *,
+                              taper_edge: bool = True,
+                              N_fft: int | None = None) -> tuple[tuple[float,float],dict]:
+    
+    #this will be for our data driven gate, we find the impulse maximums, then choose our start and stop times (t1, t2) 
+    #and using thesse t1 = min(tpos), tmax = 2*median(tpos)-t1, t2 = min(max(tpos, tmax)) to set our gate length 
+
+    freq_resp = np.asarray(freq_resp, np.complex128) #setting up our complex frequency array 
+    P, K = freq_resp.shape #[P,K] = angles x freq
+    if N_fft is None:
+        N_fft = _next_pow2_ge(2*K)
+    fs = _infer_fs_from_freqs(np.asarray(freq_list,float), N_fft)
+    dt = 1.0/fs 
+    #we are looking over our frequency response, and making it as well as setting the derivative up. 
+
+    taper = np.hanning(K) if taper_edge else np.ones(K)
+    #set up the taperred edge of our Hann window function if else we set up a series of K 
+    H = freq_resp*taper[np.newaxis,:] #impulse response of frequency put through the taperred window 
+    h_t = np.fft.ifft(H, n = N_fft, axis = 1) #back into time-domain
+
+    early = max(1, N_fft // 4) #per angle max time within the first quarter of our frequency response (this is essentially we want to look at the earliest sent signals)
+    tpos_idx = np.argmax(np.abs(h_t[:,:early])**2, axis = 1)
+    tpos = tpos_idx.astype(float)*dt #time position vector as float time the dt 
+    t1 = float(np.min(tpos))
+    tmax = 2.0*float(np.median(tpos))-t1 
+    t2 = float (np.min([np.max(tpos), tmax]))
+    if t2 <= t1:
+        t2 = t1 + 4.0*dt #this is a safety check to ensure we're not making a negative time window and expanding it if we do 
+    info = dict(fs = fs, dt = dt, tpos = tpos, tpos_idx = tpos_idx, N_fft = N_fft)
+    return (t1, t2), info
+
+def _build_gate_vector(gate_s: tuple[float, float], N : int, dt : float, alpha: float = 0.5) -> np.ndarray:
+    t1, t2 = gate_s
+    i1 = max(0, min(N-1, int(np.floor(t1/dt))))
+    i2 = max(0, min(N-1, int(np.ceil(t2/dt))))
+
+    L = max(1, i2 - i1 + 1)
+    g = np.zeros(N, dtype = float)
+    win = tukey(L, alpha = alpha) if L > 1 else np.ones(1)
+    g[i1:i2+1] = win 
+    return g
+
+
+def tgm_unsupervised(freq_resp: np.ndarray, 
+                     freq_list: float = 0.5, 
+                     N_fft: int | None = None, 
+                     refine: bool = True) -> dict:
+    #this is the unsupervised TGM it will auto gate based on (tpos/tmax) and  add in a refinement of maximizing the mean 
+    #The general flow is apply gate->FFT -> check DC magnitude -> convert dB
+    #it returns a dict with 'pattern_dB, 'gate', and some output of how the gate performed 
+
+    freq_resp = np.asarray(freq_resp, np.complex) #[P,K] = [anglesxfreq]
+    P, K = freq_resp.shape
+    gate_s, info = _tpos_auto_gate_from_data(freq_resp, freq_list, taper_edge=taper_edge, N_fft=N_fft)#this calls our function for setting up our auto gate from the data received simple windowing 
+
+    fs, dt = N = info["fs"], info["dt"], info["N_fft"]
+    taper = np.hanning(K) if taper_edge else np.ones(K)
+
+    #refinement coarse-to-fine search of gate-score for weighing best window outputs
+    #this is a TGM algorithm that's outlined in this paper: https://doi.org/10.1016/j.measurement.2023.112477
+    def _score_gate(gvec: np.ndarray, H: np.ndarray) -> float:
+        ht - np.fft.ifft(H, n = N, axis = 1)
+        Ein = np.sum((np.abs(ht)**2)*gvec[np.newaxis, :], axis = 1)
+        Etot = np.sum(np.abs(ht)**2, axis = 1)+1e12
+        return float(np.mean(Ein/Etot))
+    
+    H = freq_resp * taper[np.newaxis, :]
+    #below here we'll be refining our gate through an iterative method with weighting coefficients by scorring two gates beside each other as we go through
+    if refine:
+        t1, t2 = gate_s
+        best = gate_s
+        bestS = -np.inf
+        for pass_i in range(3):
+            w = (t2-t1)*(0.6/(2**pass_i))
+            cand_t1 = np.linspace(max(0.0, t1-w), max(0.0, t1 + w),11)
+            cand_t2 = np.linspace(max(dt, t2-w),t2+w, 11)
+            for a in cand_t1: 
+                for b in cand_t2: 
+                    if b<= a: 
+                        continue
+                    gvec = _build_gate_vector((a,b), N, dt, alpha = tukey_alpha)
+                    score = _score_gate(gvec, H)
+                    if score > bestS: 
+                        bestS = score; best = (float(a), float(b))
+                    t1, t2 = best
+                gate_s = best
+    
+    #applying final gate solution and extracting our pattern 
+    gvec = _build_gate_vector(gate_s, N, dt, alpha = tukey_alpha)
+    ht = np.fft.ifft(H, n = N, axis = 1)
+    hg = ht * gvec[np.newaxis, :]
+    Hc = np.fft.fft(hg, n = N, axis = 1)
+    mags = np.abs(Hc[:,0])
+    mags = mags / (np.max(mags) if mags.size and np.max(mags)>0 else 1.0)
+    pat_dB = 20.0 * np.log10(np.clip(mags, 1e-12, none))
+    #light smoothing 
+    pat_db = denoise_pattern(pat_db)
+    pat_db -= np.max(pat_db) if pat_db.size else 0.0
+    return dict(pattern_db = pat_db, gate = gate_s, fs = fs, dt = dt, N_fft = N, score = bestS if refine else None)
+
+
+def tgm_supervised(freq_resp: np.ndarray,
+                   freq_list: np.ndarray,
+                   ref_pattern_db: np.ndarray,
+                   f0_list: list[float] | None = None,
+                   *,
+                   taper_edge: bool = True,
+                   tukey_alpha: float = 0.5,
+                   N_fft: int | None = None) -> dict:
+    # this is a supervised TGM led by anechoic data
+    #choose [t1, t2] to minimize our root means square error amount and anchor it at the frequency selection 
+    #this functions similar to unsupervised returns a dict(pattern_db, gate, rmse_before, rmse_after) for comparisons 
+    freq_resp = np.asarray(freq_resp, np.complex128)  # [P,K]
+    ref_db = np.asarray(ref_pattern_db, float).ravel()
+    P, K = freq_resp.shape
+    # start from unsupervised gate
+    base = tgm_unsupervised(freq_resp, freq_list, taper_edge=taper_edge, tukey_alpha=tukey_alpha, N_fft=N_fft, refine=False)
+    t1, t2 = base["gate"]
+    fs, dt, N = base["fs"], base["dt"], base["N_fft"]
+    taper = np.hanning(K) if taper_edge else np.ones(K)
+    H = freq_resp * taper[np.newaxis, :]
+
+    f = np.asarray(freq_list, float).ravel()
+    if f0_list is None or len(f0_list) == 0:
+        # pick up to 3 spread anchors
+        idx = np.round(np.linspace(0, len(f)-1, num=min(3, len(f)))).astype(int)
+        f0_list = f[idx].tolist()
+    # map each f0 to nearest bin index
+    f0_idx = [int(np.argmin(np.abs(f - f0))) for f0 in f0_list]
+    def _pattern_for_gate(a: float, b: float) -> np.ndarray:
+        gvec = _build_gate_vector((a, b), N, dt, alpha=tukey_alpha)
+        ht = np.fft.ifft(H, n=N, axis=1)
+        hg = ht * gvec[np.newaxis, :]
+        Hc = np.fft.fft(hg, n=N, axis=1)
+        mags = np.abs(Hc[:, 0])
+        mags = mags / (np.max(mags) if mags.size and np.max(mags)>0 else 1.0)
+        y = 20.0 * np.log10(np.clip(mags, 1e-12, None))
+        y = denoise_pattern(y)
+        return y - np.max(y)
+
+    def _rmse(y: np.ndarray, r: np.ndarray) -> float:
+        return float(np.sqrt(np.mean((y - r)**2)))
+
+    # compute rmse_before using base unsupervised pattern
+    pat0 = base["pattern_db"]
+    rmse_before = _rmse(pat0, ref_db)
+
+    # coarse-to-fine search for [t1,t2]
+    best = (t1, t2); best_rmse = np.inf
+    for pass_i in range(3):
+        w = (t2 - t1) * (0.6 / (2**pass_i))
+        cand_t1 = np.linspace(max(0.0, t1 - w), max(0.0, t1 + w), 11)
+        cand_t2 = np.linspace(max(dt, t2 - w), t2 + w, 11)
+        for a in cand_t1:
+            for b in cand_t2:
+                if b <= a:
+                    continue
+                y = _pattern_for_gate(float(a), float(b))
+                err = _rmse(y, ref_db)
+                if err < best_rmse:
+                    best = (float(a), float(b)); best_rmse = err
+        t1, t2 = best
+
+    final_pat = _pattern_for_gate(*best)
+    rmse_after = _rmse(final_pat, ref_db)
+
+    return dict(pattern_db=final_pat, gate=best, fs=fs, dt=dt, N_fft=N,
+                rmse_before=rmse_before, rmse_after=rmse_after, anchors=f0_list)
+
+
+
+
+
+    

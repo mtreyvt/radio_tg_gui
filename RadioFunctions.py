@@ -760,5 +760,173 @@ def _collect_complex_per_angle(rx_graph,
         seg = samps[s:e] if e > s else samps[s:s+1]
         out[i] = seg.mean()
     return out
-#--------------------------------------------------------------------------EoF
 
+
+#================NEW TGM Algorithm============================================#
+#F25-05 implementation of updated algorithms to reach goals of less than 3dB difference at peaks and <10-15 dB difference at nulls 
+#this algorithm is outlines and our references are from it: https://doi.org/10.1016/j.measurement.2023.112477
+
+# ======== New: AM TGM SCANS (unsupervised & supervised) ========
+
+def _build_freq_list(params) -> np.ndarray:
+    freq_lin = np.linspace(float(params["lower_frequency"]),
+                           float(params["upper_frequency"]),
+                           int(params["freq_steps"]), dtype=float)
+    return np.unique(np.array([round_sig(v, 3) for v in freq_lin], dtype=float))
+
+def _build_angle_grid(params) -> np.ndarray:
+    mast_start = float(params["mast_start_angle"])
+    mast_end   = float(params["mast_end_angle"])
+    mast_steps = int(params["mast_steps"])
+    return np.linspace(mast_start, mast_end, mast_steps, endpoint=False, dtype=float)
+
+def do_AMTGMscan_unsupervised(params):
+    """
+    Angle scan across a frequency sweep, then apply the NEW unsupervised TGM.
+    Returns dict with angles_deg, tgm_db, gate_ns, etc.
+    """
+    motor_controller = InitMotor(params)
+    datafile = OpenDatafile(params)
+
+    freq_list = _build_freq_list(params)
+    mast_angles = _build_angle_grid(params)
+    mast_steps, Nf = len(mast_angles), len(freq_list)
+    responses = np.zeros((mast_steps, Nf), dtype=np.complex128)
+
+    # Collect complex per-angle across the sweep
+    for fi, freq in enumerate(freq_list):
+        rx = RxRadio.RadioFlowGraph(params["rx_radio_id"], freq, params["rx_freq_offset"])
+        tx = TxRadio.RadioFlowGraph(params["tx_radio_id"], freq, params["tx_freq_offset"])
+        tx.start(); time.sleep(3)
+        per_angle = _collect_complex_per_angle(rx, mast_angles[0], mast_angles[-1]+(mast_angles[1]-mast_angles[0] if mast_steps>1 else 1.0), mast_steps, motor_controller)
+        responses[:, fi] = per_angle
+        try: rx.stop(); rx.wait()
+        except: pass
+        try: tx.stop(); tx.wait()
+        except: pass
+        motor_controller.rotate_mast(0)
+        for ang, cval in zip(mast_angles, per_angle):
+            datafile.write(f"{ang:.1f},0.0,0.0,{cval.real:.8e},{cval.imag:.8e}\n")
+
+    datafile.close()
+    print("raw datafile closed")
+
+    # NEW unsupervised TGM
+    out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True, tukey_alpha=0.5, N_fft=None, refine=True)
+    tgm_db = out["pattern_db"].astype(float)
+    gate = out["gate"]
+    print(f"[Unsupervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
+
+    # Plot
+    try:
+        plot_polar_patterns(
+            mast_angles,
+            traces=[("TGM (unsupervised)", tgm_db)],
+            rmin=-60.0, rmax=0.0, rticks=(-60,-40,-20,0),
+            title="Radiation Pattern (NEW TGM, unsupervised)"
+        )
+        plot_patterns(mast_angles, traces=[("TGM (unsupervised)", tgm_db)], title="Radiation Pattern (NEW TGM, unsupervised)")
+    except Exception:
+        pass
+
+    return dict(angles_deg=mast_angles.tolist(),
+                tgm_db=tgm_db.tolist(),
+                gate_ns=((gate[0]*1e9), (gate[1]*1e9)))
+
+def do_AMTGMscan_supervised(params, ref_file: str):
+    """
+    Same sweep, but optimize the gate against a *reference* anechoic pattern
+    (supervised). The reference file should provide angles + dB pattern.
+    """
+    # Load reference (angle, amp_dB) flexible reader
+    def _read_ref_pattern(fname: str) -> tuple[np.ndarray, np.ndarray]:
+        import pandas as pd, numpy as np
+        df = pd.read_csv(fname)
+        cols = [c.lower() for c in df.columns]
+        # angle and either 'dB' column or linear that we'll convert
+        a_idx = next((i for i,c in enumerate(cols) if any(k in c for k in ("angle","deg","theta"))), 0)
+        y_idx = next((i for i,c in enumerate(cols) if "db" in c), None)
+        ang = np.asarray(df.iloc[:, a_idx], float)
+        if y_idx is None:
+            # last numeric column
+            num_cols = [i for i,c in enumerate(df.dtypes) if c!=object and i!=a_idx]
+            y = np.asarray(df.iloc[:, num_cols[-1]], float)
+            if np.any(y>5) and not np.all(y<1):  # crude heuristic
+                y = 20.0*np.log10(np.clip(y, 1e-12, None))
+        else:
+            y = np.asarray(df.iloc[:, y_idx], float)
+        # sort & wrap
+        ang = np.mod(ang, 360.0)
+        order = np.argsort(ang)
+        ang = ang[order]; y = y[order]
+        y = y - np.max(y)
+        return ang, y
+
+    motor_controller = InitMotor(params)
+    datafile = OpenDatafile(params)
+
+    freq_list = _build_freq_list(params)
+    mast_angles = _build_angle_grid(params)
+    mast_steps, Nf = len(mast_angles), len(freq_list)
+    responses = np.zeros((mast_steps, Nf), dtype=np.complex128)
+
+    # Collect sweep
+    for fi, freq in enumerate(freq_list):
+        rx = RxRadio.RadioFlowGraph(params["rx_radio_id"], freq, params["rx_freq_offset"])
+        tx = TxRadio.RadioFlowGraph(params["tx_radio_id"], freq, params["tx_freq_offset"])
+        tx.start(); time.sleep(3)
+        per_angle = _collect_complex_per_angle(rx, mast_angles[0], mast_angles[-1]+(mast_angles[1]-mast_angles[0] if mast_steps>1 else 1.0), mast_steps, motor_controller)
+        responses[:, fi] = per_angle
+        try: rx.stop(); rx.wait()
+        except: pass
+        try: tx.stop(); tx.wait()
+        except: pass
+        motor_controller.rotate_mast(0)
+        for ang, cval in zip(mast_angles, per_angle):
+            datafile.write(f"{ang:.1f},0.0,0.0,{cval.real:.8e},{cval.imag:.8e}\n")
+
+    datafile.close()
+    print("raw datafile closed")
+
+    # Load reference pattern and interpolate to our angle grid if needed
+    try:
+        ang_ref, y_ref = _read_ref_pattern(ref_file)
+    except Exception as e:
+        print(f"Failed to read reference pattern '{ref_file}': {e}")
+        return None
+    # interpolate y_ref onto mast_angles
+    def circ_interp(ang_src, y_src, ang_dst):
+        ang_src = np.asarray(ang_src); y_src = np.asarray(y_src)
+        # extend by 360 wrap for linear interp
+        aext = np.r_[ang_src[0]-360, ang_src, ang_src[-1]+360]
+        yext = np.r_[y_src[-1], y_src, y_src[0]]
+        return np.interp(np.mod(ang_dst, 360.0), aext, yext)
+    ref_on_grid = circ_interp(ang_ref, y_ref, mast_angles)
+
+    # NEW supervised TGM
+    out = TimeGating.tgm_supervised(responses, freq_list, ref_on_grid, f0_list=None,
+                                    taper_edge=True, tukey_alpha=0.5, N_fft=None)
+    tgm_db = out["pattern_db"].astype(float)
+    gate = out["gate"]
+    print(f"[Supervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
+    print(f"RMSE: before={out['rmse_before']:.2f} dB  after={out['rmse_after']:.2f} dB")
+
+    # Plot
+    try:
+        plot_polar_patterns(
+            mast_angles,
+            traces=[("Reference (anechoic)", ref_on_grid), ("TGM (supervised)", tgm_db)],
+            rmin=-60.0, rmax=0.0, rticks=(-60,-40,-20,0),
+            title="Radiation Pattern (NEW TGM, supervised)"
+        )
+        plot_patterns(mast_angles, traces=[("Reference", ref_on_grid), ("TGM (supervised)", tgm_db)],
+                      title="Radiation Pattern (NEW TGM, supervised)")
+    except Exception:
+        pass
+
+    return dict(angles_deg=mast_angles.tolist(),
+                tgm_db=tgm_db.tolist(),
+                ref_db=ref_on_grid.tolist(),
+                gate_ns=((gate[0]*1e9), (gate[1]*1e9)),
+                rmse_before=float(out["rmse_before"]),
+                rmse_after=float(out["rmse_after"]))

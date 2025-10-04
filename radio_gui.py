@@ -114,6 +114,8 @@ class RadioGUI:
             ("Time‑Gated FastScan (rotating, freq sweep)", self._handle_am_tg_scan),
             ("Time‑Gated single pointing (freq sweep, no rotation)", self._handle_single_tg),
             ("Time‑Gated single frequency @ 2.5 GHz (rotating)", self._handle_single_freq_tg),
+            ("NEW TGM (unsupervised)", self._handle_new_tgm_unsup),
+            ("NEW TGM (supervised vs. reference file)", self._handle_new_tgm_sup),
             ("Quit", self._quit_application),
         ]
 
@@ -363,6 +365,32 @@ class RadioGUI:
     def _quit_application(self) -> None:
         """Close the application."""
         self.master.destroy()
+
+#------new TGM algorithm functions
+
+    def _handle_new_tgm_unsup(self) -> None:
+        params = self._load_params()
+        if not hasattr(RadioFunctions, 'do_AMTGMscan_unsupervised'):
+            messagebox.showerror("Not Implemented", "Unsupervised TGM scan function is not available.")
+            return
+        self._run_task(RadioFunctions.do_AMTGMscan_unsupervised, args=(params,),
+                       description="NEW TGM (unsupervised)", callback=self._update_last_data)
+
+    def _handle_new_tgm_sup(self) -> None:
+        params = self._load_params()
+        if not hasattr(RadioFunctions, 'do_AMTGMscan_supervised'):
+            messagebox.showerror("Not Implemented", "Supervised TGM scan function is not available.")
+            return
+        ref_file = filedialog.askopenfilename(
+            title="Select anechoic/reference file (angle + dB)",
+            filetypes=[("CSV/TXT", "*.csv *.txt"), ("All files", "*.*")]
+        )
+        if not ref_file:
+            return
+        self._run_task(RadioFunctions.do_AMTGMscan_supervised,
+                       args=(params, ref_file),
+                       description=f"NEW TGM (supervised) vs {ref_file}",
+                       callback=self._update_last_data)
 
 
 def main() -> None:

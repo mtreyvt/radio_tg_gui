@@ -30,7 +30,9 @@ def main():
     menu_choices.append("Time-Gated FastScan (rotating, freq SWEEP)")          # 10 -> do_AMTGscan
     menu_choices.append("Time-Gated single pointing (freq SWEEP, no rotation)")# 11 -> do_singleTG
     menu_choices.append("Time-Gated single frequency @ 2.5 GHz (rotating)")    # 12 -> do_AMTGscan_single_freq
-    menu_choices.append("Quit")                                                # 13
+    menu_choices.append("NEW TGM (unsupervised)")                              # 13 -> do_AMTGMscan_unsupervised
+    menu_choices.append("NEW TGM (supervised vs. reference file)")             # 14 -> do_AMTGMscan_supervised
+    menu_choices.append("Quit")                                                # 15
 
     while not quit:
         try:
@@ -97,6 +99,22 @@ def main():
                 data = RadioFunctions.do_AMTGscan_single_freq(params, freq_hz=2.5e9, show_plots=True)
 
             elif selection == 13:
+                params = RadioFunctions.LoadParams(param_filename)
+                data = RadioFunctions.do_AMTGMscan_unsupervised(params)
+                print(data)
+
+            elif selection == 14:
+                import os
+                params = RadioFunctions.LoadParams(param_filename)
+                ref_file = input("Enter path to anechoic/reference CSV/TXT (angle,dB): ").strip()
+                if not ref_file or not os.path.exists(ref_file):
+                    print("Invalid reference file. Aborting.")
+                else:
+                    data = RadioFunctions.do_AMTGMscan_supervised(params, ref_file)
+                    print(data)
+
+
+            elif selection == 15:
                 print("Exiting...\n")
                 quit = True
 
