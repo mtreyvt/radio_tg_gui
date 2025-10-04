@@ -151,7 +151,7 @@ def print_and_return_data(data):
 #F25-05 Senior Design Team 
 
 def _next_pow2_ge(n: int, min_n: int = 256) -> int:
-    return new_pow2(max(min_n, n))
+    return _next_pow2(max(min_n, n))
 
 def _tpos_auto_gate_from_data(freq_resp: np.ndarray,
                               freq_list: np.ndarray, 
