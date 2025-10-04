@@ -198,9 +198,12 @@ def _build_gate_vector(gate_s: tuple[float, float], N : int, dt : float, alpha: 
     return g
 
 
-def tgm_unsupervised(freq_resp: np.ndarray, 
-                     freq_list: float = 0.5, 
-                     N_fft: int | None = None, 
+def tgm_unsupervised(freq_resp: np.ndarray,
+                     freq_list: np.ndarray,
+                     *,
+                     taper_edge: bool = True,
+                     tukey_alpha: float = 0.5,
+                     N_fft: int | None = None,
                      refine: bool = True) -> dict:
     #this is the unsupervised TGM it will auto gate based on (tpos/tmax) and  add in a refinement of maximizing the mean 
     #The general flow is apply gate->FFT -> check DC magnitude -> convert dB

@@ -829,9 +829,7 @@ def do_AMTGMscan_unsupervised(params):
     except Exception:
         pass
 
-    return dict(angles_deg=mast_angles.tolist(),
-                tgm_db=tgm_db.tolist(),
-                gate_ns=((gate[0]*1e9), (gate[1]*1e9)))
+    return mast_angles.tolist(), tgm_db.tolist()
 
 def do_AMTGMscan_supervised(params, ref_file: str):
     """
@@ -924,9 +922,8 @@ def do_AMTGMscan_supervised(params, ref_file: str):
     except Exception:
         pass
 
-    return dict(angles_deg=mast_angles.tolist(),
-                tgm_db=tgm_db.tolist(),
-                ref_db=ref_on_grid.tolist(),
-                gate_ns=((gate[0]*1e9), (gate[1]*1e9)),
-                rmse_before=float(out["rmse_before"]),
-                rmse_after=float(out["rmse_after"]))
+ 
+    return mast_angles.tolist(), tgm_db.tolist()
+
+
+
