@@ -1,7 +1,7 @@
 {
-    "frequency"        : 2.4e9,
-    "upper_frequency"  : 2.5e9,
-    "lower_frequency"  : 2.3e9,
+    "frequency"        : 5.6e9,
+    "upper_frequency"  : 5.8e9,
+    "lower_frequency"  : 5.4e9,
     "freq_steps"       : 2,
     "filename"         : "_antenna_data.csv",
     "notes"            : "Experiment",
