@@ -782,8 +782,27 @@ def _build_angle_grid(params) -> np.ndarray:
 
 def do_AMTGMscan_unsupervised(params):
     """
-    Angle scan across a frequency sweep, then apply the NEW unsupervised TGM.
-    Returns dict with angles_deg, tgm_db, gate_ns, etc.
+    Perform an angle scan across a frequency sweep, then apply the new
+    unsupervised Time‑Gating Method (TGM).
+
+    A complex response is captured for each mast angle across the desired
+    frequency range.  After the sweep, the unsupervised TGM is applied to
+    determine an appropriate time‑gating window and extract a radiation
+    pattern.  A simple baseline (noisy) pattern is also computed as the
+    magnitude of the raw responses averaged across frequency for each
+    angle.  Both the TGM‑corrected and noisy patterns are plotted on
+    polar and Cartesian axes.
+
+    Parameters
+    ----------
+    params : dict
+        Measurement parameters loaded from the JSON configuration file.
+
+    Returns
+    -------
+    tuple (angles_deg, pattern_db)
+        A tuple containing the list of mast angles in degrees and the
+        corresponding TGM‑corrected pattern in dB.
     """
     motor_controller = InitMotor(params)
     datafile = OpenDatafile(params)
@@ -811,33 +830,81 @@ def do_AMTGMscan_unsupervised(params):
     datafile.close()
     print("raw datafile closed")
 
-    # NEW unsupervised TGM
-    out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True, tukey_alpha=0.5, N_fft=None, refine=True)
+    # Apply the new unsupervised TGM algorithm
+    out = TimeGating.tgm_unsupervised(
+        responses, freq_list,
+        taper_edge=True, tukey_alpha=0.5, N_fft=None, refine=True
+    )
     tgm_db = out["pattern_db"].astype(float)
-    gate   = out["gate"]
-    print(f"[Unsupervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
+    gate = out["gate"]
+    print(
+        f"[Unsupervised TGM] t1={gate[0] * 1e9:.2f} ns, "
+        f"t2={gate[1] * 1e9:.2f} ns, width={(gate[1] - gate[0]) * 1e9:.2f} ns"
+    )
 
-    # For plotting (dB), keep using tgm_db internally
+    # Optional: compute a baseline (noisy) pattern for comparison.  We average
+    # the magnitude of the raw responses across the frequency sweep for each
+    # angle and normalize to 0 dB.
+    noisy_mags = np.mean(np.abs(responses), axis=1)
+    if np.max(noisy_mags) > 0:
+        noisy_db = 20.0 * np.log10(noisy_mags / np.max(noisy_mags))
+    else:
+        noisy_db = 20.0 * np.log10(np.clip(noisy_mags, 1e-12, None))
+    # Smooth the noisy pattern slightly
+    noisy_db = TimeGating.denoise_pattern(noisy_db)
+
+    # Plot the polar and Cartesian patterns with both traces
     try:
         plot_polar_patterns(
             mast_angles,
-            traces=[("TGM (unsupervised)", tgm_db)],
-            rmin=-60.0, rmax=0.0, rticks=(-60,-40,-20,0),
+            traces=[
+                ("TGM (unsupervised)", tgm_db),
+                ("Noisy", noisy_db),
+            ],
+            rmin=-60.0,
+            rmax=0.0,
+            rticks=(-60, -40, -20, 0),
             title="Radiation Pattern (NEW TGM, unsupervised)"
         )
-        plot_patterns(mast_angles, traces=[("TGM (unsupervised)", tgm_db)], title="Radiation Pattern (NEW TGM, unsupervised)")
+        plot_patterns(
+            mast_angles,
+            traces=[
+                ("TGM (unsupervised)", tgm_db),
+                ("Noisy", noisy_db),
+            ],
+            title="Radiation Pattern (NEW TGM, unsupervised)"
+        )
     except Exception:
         pass
 
-# Return single ndarray (linear, normalized)
-    y_lin = 10.0 ** (tgm_db / 20.0)
-    return np.column_stack([mast_angles, np.zeros_like(mast_angles), np.zeros_like(mast_angles), y_lin])
+    # Return tuple for convenience: (angles_deg, pattern_db)
+    return mast_angles, tgm_db
 
 
 def do_AMTGMscan_supervised(params, ref_file: str):
     """
-    Same sweep, but optimize the gate against a *reference* anechoic pattern
-    (supervised). The reference file should provide angles + dB pattern.
+    Perform the same angle/frequency sweep as the unsupervised scan, but
+    optimize the time‑gating window against a reference anechoic pattern
+    (supervised).  The reference file should provide a CSV with angle and
+    pattern (in dB or linear) columns.  The gate is optimized to minimize
+    the root‑mean‑square error between the TGM‑corrected pattern and the
+    reference.
+
+    Parameters
+    ----------
+    params : dict
+        Measurement parameters loaded from the JSON configuration.
+    ref_file : str
+        Path to a CSV or TXT file containing the reference pattern to
+        compare against.  The file should include an angle column and a
+        pattern column (either dB or linear values).  Angles will be
+        wrapped to [0,360) and interpolated onto the measurement grid.
+
+    Returns
+    -------
+    tuple (angles_deg, pattern_db)
+        The list of mast angles and the supervised TGM‑corrected pattern
+        (in dB) aligned with those angles.
     """
     # Load reference (angle, amp_dB) flexible reader
     def _read_ref_pattern(fname: str) -> tuple[np.ndarray, np.ndarray]:
@@ -927,9 +994,8 @@ def do_AMTGMscan_supervised(params, ref_file: str):
     except Exception:
         pass
 
-    # Return single ndarray (linear, normalized)
-    y_lin = 10.0 ** (tgm_db / 20.0)
-    return np.column_stack([mast_angles, np.zeros_like(mast_angles), np.zeros_like(mast_angles), y_lin])
+    # Return tuple for convenience: (angles_deg, pattern_db)
+    return mast_angles, tgm_db
 
 def _ensure_tuple_result(res):
     """
