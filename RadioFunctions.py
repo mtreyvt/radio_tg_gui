@@ -811,25 +811,70 @@ def do_AMTGMscan_unsupervised(params):
     datafile.close()
     print("raw datafile closed")
 
-    # NEW unsupervised TGM
-    out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True, tukey_alpha=0.5, N_fft=None, refine=True)
+    # --- NEW unsupervised TGM ---
+    out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True,
+                                      tukey_alpha=0.5, N_fft=None, refine=True)
     tgm_db = out["pattern_db"].astype(float)
     gate   = out["gate"]
+    dt     = out.get("dt", None)
+    N_fft  = out.get("N_fft", None)
     print(f"[Unsupervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
 
-    # For plotting (dB), keep using tgm_db internally
+    # --- Plot impulse response & gate for the angle with peak TGM ---
+    try:
+        import matplotlib.pyplot as plt
+        from TimeGating import _build_gate_vector
+        # Select the angle with the maximum gated pattern
+        idx_peak = int(np.argmax(tgm_db))
+        # Build taper to match the unsupervised call
+        taper = np.hanning(len(freq_list)) if True else np.ones(len(freq_list))
+        # Compute the frequency-domain spectrum for this angle
+        Hk = responses[idx_peak, :] * taper
+        # Compute impulse response using N_fft and dt from TGM
+        ht = np.fft.ifft(Hk, n=N_fft)
+        # Build gate vector using the returned gate and dt
+        gvec = _build_gate_vector(gate, N_fft, dt, alpha=0.5)
+        # Time axis in ns
+        t_ns = np.arange(N_fft) * dt * 1e9
+        # Convert impulse magnitude to dB
+        ht_db = 20.0 * np.log10(np.abs(ht) + 1e-12)
+        fig, ax1 = plt.subplots()
+        color1 = 'tab:blue'
+        ax1.plot(t_ns, ht_db, color=color1, linewidth=1.2, label='|h(t)| (dB)')
+        ax1.set_xlabel('Time (ns)')
+        ax1.set_ylabel('|h(t)| (dB)', color=color1)
+        ax1.tick_params(axis='y', labelcolor=color1)
+        ax2 = ax1.twinx()
+        color2 = 'tab:orange'
+        ax2.plot(t_ns, gvec, color=color2, linewidth=1.2, label='Gate')
+        ax2.set_ylabel('Gate', color=color2)
+        ax2.tick_params(axis='y', labelcolor=color2)
+        ax1.set_title(f'Unsupervised TGM gate: t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns (angle {mast_angles[idx_peak]:.1f}°)')
+        # Combine legends from both axes
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+        ax1.grid(True)
+        plt.show()
+    except Exception as e:
+        # graceful fallback if plotting fails
+        print(f"Could not plot impulse+gate: {e}")
+
+    # --- Plot polar and Cartesian patterns ---
     try:
         plot_polar_patterns(
             mast_angles,
             traces=[("TGM (unsupervised)", tgm_db)],
-            rmin=-60.0, rmax=0.0, rticks=(-60,-40,-20,0),
+            rmin=-60.0, rmax=0.0, rticks=(-60, -40, -20, 0),
             title="Radiation Pattern (NEW TGM, unsupervised)"
         )
-        plot_patterns(mast_angles, traces=[("TGM (unsupervised)", tgm_db)], title="Radiation Pattern (NEW TGM, unsupervised)")
+        plot_patterns(mast_angles,
+                      traces=[("TGM (unsupervised)", tgm_db)],
+                      title="Radiation Pattern (NEW TGM, unsupervised)")
     except Exception:
         pass
 
-# Return single ndarray (linear, normalized)
+    # Return single ndarray (linear, normalized)
     y_lin = 10.0 ** (tgm_db / 20.0)
     return np.column_stack([mast_angles, np.zeros_like(mast_angles), np.zeros_like(mast_angles), y_lin])
 

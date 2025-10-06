@@ -1,12 +1,13 @@
 # TimeGating.py
 import numpy as np
-# Import Tukey window from the proper submodule; fall back to Hann if unavailable
+# Import Tukey window from the proper submodule; fall back to Hann if unavailable.
+# On some SciPy versions, tukey is found in scipy.signal.windows.  If that fails,
+# approximate with a Hann window.
 try:
     from scipy.signal.windows import tukey
 except Exception:
     try:
-        # older SciPy may not expose tukey; approximate via Hann window
-        from scipy.signal.windows import hann as tukey
+        from scipy.signal.windows import hann as tukey  # use Hann as fallback
     except Exception:
         def tukey(M: int, alpha: float = 0.5) -> np.ndarray:
             """Fallback Tukey window using Hann when scipy lacks tukey."""
@@ -178,22 +179,19 @@ def _tpos_auto_gate_from_data(freq_resp: np.ndarray,
     P, K = freq_resp.shape #[P,K] = angles x freq
     if N_fft is None:
         N_fft = _next_pow2_ge(2*K)
-    fs = _infer_fs_from_freqs(np.asarray(freq_list,float), N_fft)
-    # Inference of sample spacing (dt) should be based on the effective
-    # bandwidth of the measurement rather than the oversampled IFFT rate.
-    # If there are K frequency points spaced by df Hz, the usable
-    # bandwidth is approximately K*df (assuming contiguous sampling), so
-    # dt_B = 1 / (K*df).  This prevents the gate window from collapsing to
-    # a single time sample when N_fft is large and df is small.
+    # Infer a notional sample rate fs from the frequency grid spacing
+    fs = _infer_fs_from_freqs(np.asarray(freq_list, float), N_fft)
+    # Derive the effective time resolution dt based on the measurement bandwidth
+    # If there are K frequency points spaced by df, the usable bandwidth is K*df
+    # (assuming contiguous sampling).  Using dt=1/B prevents the gate from
+    # collapsing to a single sample when N_fft is large and df is small.
     if K > 1:
         # median frequency spacing
         df = float(np.median(np.diff(np.sort(np.asarray(freq_list, float)))))
         B = df * float(K)
-        dt_band = 1.0 / B if B > 0.0 else 1.0 / fs
+        dt = 1.0 / B if B > 0.0 else 1.0 / fs
     else:
-        dt_band = 1.0 / fs
-    # use dt based on bandwidth
-    dt = dt_band
+        dt = 1.0 / fs
     #we are looking over our frequency response, and making it as well as setting the derivative up. 
 
     taper = np.hanning(K) if taper_edge else np.ones(K)
@@ -235,39 +233,31 @@ def tgm_unsupervised(freq_resp: np.ndarray,
     #The general flow is apply gate->FFT -> check DC magnitude -> convert dB
     #it returns a dict with 'pattern_dB, 'gate', and some output of how the gate performed 
 
-    # Convert to a fixed-precision complex type to avoid np.complex deprecation
+    # Convert the input to a complex128 array and determine its shape
     freq_resp = np.asarray(freq_resp, np.complex128)
     P, K = freq_resp.shape
-    # Automatically pick an initial gate [t1,t2] from the data
+    # Derive an initial gate [t1,t2] based on the times of the impulse maxima
     gate_s, info = _tpos_auto_gate_from_data(freq_resp, freq_list,
                                              taper_edge=taper_edge, N_fft=N_fft)
-
-    # Unpack info: fs (sample rate), dt (time resolution) and N (FFT size)
     fs, dt, N = info["fs"], info["dt"], info["N_fft"]
-
-    # Frequency-edge taper (Hann) if desired
+    # Apply a Hann taper on the frequency edges if requested
     taper = np.hanning(K) if taper_edge else np.ones(K)
     H = freq_resp * taper[np.newaxis, :]
 
-    # Define a scoring function for a candidate gate.  It measures the
-    # fraction of energy inside the gate versus the total energy, averaged
-    # over all angles.  The impulse response ht is computed locally.
+    # Scoring function: mean fraction of energy inside the gate
     def _score_gate(gvec: np.ndarray, H: np.ndarray) -> float:
         ht = np.fft.ifft(H, n=N, axis=1)
-        # Energy inside and outside the gate
         Ein = np.sum(np.abs(ht)**2 * gvec[np.newaxis, :], axis=1)
         Eall = np.sum(np.abs(ht)**2, axis=1) + 1e-12
         return float(np.mean(Ein / Eall))
 
-    # Optionally refine the gate via a coarse-to-fine search around the
-    # initial estimate.  At each pass, search over candidate start/end
-    # times and pick the gate that maximises the energy ratio.
+    # Optional refinement via coarse-to-fine search
     best = gate_s
     bestS = -np.inf
     if refine:
         t1, t2 = gate_s
         for pass_i in range(3):
-            w = (t2 - t1) * (0.6 / (2**pass_i))
+            w = (t2 - t1) * (0.6 / (2 ** pass_i))
             cand_t1 = np.linspace(max(0.0, t1 - w), max(0.0, t1 + w), 11)
             cand_t2 = np.linspace(max(dt, t2 - w), t2 + w, 11)
             for a in cand_t1:
@@ -279,28 +269,25 @@ def tgm_unsupervised(freq_resp: np.ndarray,
                     if score > bestS:
                         bestS = score
                         best = (float(a), float(b))
-            # Update centre for next pass
             t1, t2 = best
         gate_s = best
     else:
-        # Set best score if no refinement
+        # Compute score for the initial gate if no refinement
         bestS = _score_gate(_build_gate_vector(gate_s, N, dt, alpha=tukey_alpha), H)
 
-    # Apply the final gate and compute the gated pattern
+    # Apply the final gate and compute the pattern
     gvec = _build_gate_vector(gate_s, N, dt, alpha=tukey_alpha)
     ht = np.fft.ifft(H, n=N, axis=1)
     hg = ht * gvec[np.newaxis, :]
     Hc = np.fft.fft(hg, n=N, axis=1)
     mags = np.abs(Hc[:, 0])
-    # Normalise magnitude before converting to dB
     mags = mags / (np.max(mags) if mags.size and np.max(mags) > 0 else 1.0)
     pat_db = 20.0 * np.log10(np.clip(mags, 1e-12, None))
-    # Light smoothing via Savitzky-Golay filter
+    # Light smoothing
     pat_db = denoise_pattern(pat_db)
     # Peak-normalise to 0 dB
     pat_db = pat_db - (np.max(pat_db) if pat_db.size else 0.0)
-    return dict(pattern_db=pat_db, gate=gate_s, fs=fs, dt=dt,
-                N_fft=N, score=bestS)
+    return dict(pattern_db=pat_db, gate=gate_s, fs=fs, dt=dt, N_fft=N, score=bestS)
 
 
 def tgm_supervised(freq_resp: np.ndarray,
