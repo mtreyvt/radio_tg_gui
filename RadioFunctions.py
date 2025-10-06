@@ -908,27 +908,97 @@ def do_AMTGMscan_supervised(params, ref_file: str):
     """
     # Load reference (angle, amp_dB) flexible reader
     def _read_ref_pattern(fname: str) -> tuple[np.ndarray, np.ndarray]:
-        import pandas as pd, numpy as np
-        df = pd.read_csv(fname)
-        cols = [c.lower() for c in df.columns]
-        # angle and either 'dB' column or linear that we'll convert
-        a_idx = next((i for i,c in enumerate(cols) if any(k in c for k in ("angle","deg","theta"))), 0)
-        y_idx = next((i for i,c in enumerate(cols) if "db" in c), None)
-        ang = np.asarray(df.iloc[:, a_idx], float)
+    """
+    Read a reference pattern CSV/TXT without requiring pandas.
+    It accepts files with headers such as 'angle'/'deg' and 'db' or linear magnitude.
+    If no 'db' column is present, the last numeric column is assumed to be linear and
+    will be converted to dB if values exceed unity.
+    """
+    import numpy as np, csv, os
+    if not os.path.exists(fname):
+        raise FileNotFoundError(fname)
+
+    # Try numpy.genfromtxt with names; fall back to manual CSV parsing
+    ang = None; y = None
+    try:
+        arr = np.genfromtxt(fname, delimiter=',', names=True, dtype=None, encoding=None)
+        if arr.dtype.names is None:
+            raise ValueError
+    except Exception:
+        try:
+            arr = np.genfromtxt(fname, delimiter=None, names=True, dtype=None, encoding=None)
+            if arr.dtype.names is None:
+                raise ValueError
+        except Exception:
+            arr = None
+
+    if arr is not None and arr.dtype.names:
+        names = [n.lower() for n in arr.dtype.names]
+        a_idx = next((i for i, n in enumerate(names) if any(k in n for k in ("angle","deg","theta"))), 0)
+        y_idx = next((i for i, n in enumerate(names) if "db" in n), None)
+        ang = np.asarray(arr[arr.dtype.names[a_idx]], float)
         if y_idx is None:
-            # last numeric column
-            num_cols = [i for i,c in enumerate(df.dtypes) if c!=object and i!=a_idx]
-            y = np.asarray(df.iloc[:, num_cols[-1]], float)
-            if np.any(y>5) and not np.all(y<1):  # crude heuristic
-                y = 20.0*np.log10(np.clip(y, 1e-12, None))
+            num_idx = [i for i, n in enumerate(arr.dtype.names) if i != a_idx]
+            vals = np.asarray(arr[arr.dtype.names[num_idx[-1]]], float)
+            if np.any(vals > 5.0) and not np.all(vals < 1.0):
+                vals = 20.0 * np.log10(np.clip(vals, 1e-12, None))
+            y = vals
         else:
-            y = np.asarray(df.iloc[:, y_idx], float)
-        # sort & wrap
-        ang = np.mod(ang, 360.0)
-        order = np.argsort(ang)
-        ang = ang[order]; y = y[order]
-        y = y - np.max(y)
-        return ang, y
+            y = np.asarray(arr[arr.dtype.names[y_idx]], float)
+
+    if ang is None or y is None:
+        # Manual CSV parsing as last resort
+        with open(fname, 'r', newline='') as fp:
+            reader = csv.reader(fp)
+            header = None
+            rows = []
+            for row in reader:
+                if not row:
+                    continue
+                if header is None:
+                    header = [c.strip().lower() for c in row]
+                else:
+                    rows.append([v.strip() for v in row])
+        if header is None or not rows:
+            raise ValueError("Reference file appears empty or has no data")
+
+        a_idx = next((i for i, c in enumerate(header) if any(k in c for k in ("angle","deg","theta"))), 0)
+        y_idx = next((i for i, c in enumerate(header) if "db" in c), None)
+
+        ang_vals, y_vals = [], []
+        for row in rows:
+            try:
+                ang_vals.append(float(row[a_idx]))
+            except Exception:
+                continue
+            if y_idx is None:
+                for j in reversed(range(len(row))):
+                    if j != a_idx:
+                        try:
+                            y_vals.append(float(row[j]))
+                            break
+                        except Exception:
+                            continue
+            else:
+                try:
+                    y_vals.append(float(row[y_idx]))
+                except Exception:
+                    y_vals.append(np.nan)
+
+        ang = np.asarray(ang_vals, float)
+        y = np.asarray(y_vals, float)
+        if y_idx is None:
+            if np.any(y > 5.0) and not np.all(y < 1.0):
+                y = 20.0 * np.log10(np.clip(y, 1e-12, None))
+
+    # Wrap angles into [0,360), sort and normalise to 0 dB peak
+    ang = np.mod(ang, 360.0)
+    order = np.argsort(ang)
+    ang = ang[order]
+    y = y[order]
+    y = y - np.max(y)
+    return ang, y
+
 
     motor_controller = InitMotor(params)
     datafile = OpenDatafile(params)
