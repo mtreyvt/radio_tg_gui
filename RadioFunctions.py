@@ -812,8 +812,16 @@ def do_AMTGMscan_unsupervised(params):
     print("raw datafile closed")
 
     # --- NEW unsupervised TGM ---
+    # Optional maximum gate width (ns) from params; if provided, enforce it
+    max_gate = None
+    try:
+        max_gate = float(params.get("tg_max_ns", None)) if params.get("tg_max_ns") is not None else None
+    except Exception:
+        max_gate = None
+
     out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True,
-                                      tukey_alpha=0.5, N_fft=None, refine=True)
+                                      tukey_alpha=0.5, N_fft=None, refine=True,
+                                      max_gate_ns=max_gate)
     tgm_db = out["pattern_db"].astype(float)
     gate   = out["gate"]
     dt     = out.get("dt", None)

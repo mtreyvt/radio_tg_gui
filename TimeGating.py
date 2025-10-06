@@ -228,7 +228,8 @@ def tgm_unsupervised(freq_resp: np.ndarray,
                      taper_edge: bool = True,
                      tukey_alpha: float = 0.5,
                      N_fft: int | None = None,
-                     refine: bool = True) -> dict:
+                     refine: bool = True,
+                     max_gate_ns: float | None = None) -> dict:
     #this is the unsupervised TGM it will auto gate based on (tpos/tmax) and  add in a refinement of maximizing the mean 
     #The general flow is apply gate->FFT -> check DC magnitude -> convert dB
     #it returns a dict with 'pattern_dB, 'gate', and some output of how the gate performed 
@@ -274,6 +275,13 @@ def tgm_unsupervised(freq_resp: np.ndarray,
     else:
         # Compute score for the initial gate if no refinement
         bestS = _score_gate(_build_gate_vector(gate_s, N, dt, alpha=tukey_alpha), H)
+
+    # Enforce a maximum gate width if specified (in nanoseconds)
+    if max_gate_ns is not None:
+        max_width_s = float(max_gate_ns) * 1e-9
+        t1_tmp, t2_tmp = gate_s
+        if (t2_tmp - t1_tmp) > max_width_s:
+            gate_s = (t1_tmp, t1_tmp + max_width_s)
 
     # Apply the final gate and compute the pattern
     gvec = _build_gate_vector(gate_s, N, dt, alpha=tukey_alpha)
