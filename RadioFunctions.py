@@ -814,10 +814,10 @@ def do_AMTGMscan_unsupervised(params):
     # NEW unsupervised TGM
     out = TimeGating.tgm_unsupervised(responses, freq_list, taper_edge=True, tukey_alpha=0.5, N_fft=None, refine=True)
     tgm_db = out["pattern_db"].astype(float)
-    gate = out["gate"]
+    gate   = out["gate"]
     print(f"[Unsupervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
 
-    # Plot
+    # For plotting (dB), keep using tgm_db internally
     try:
         plot_polar_patterns(
             mast_angles,
@@ -829,7 +829,10 @@ def do_AMTGMscan_unsupervised(params):
     except Exception:
         pass
 
-    return mast_angles.tolist(), tgm_db.tolist()
+# Return single ndarray (linear, normalized)
+    y_lin = 10.0 ** (tgm_db / 20.0)
+    return np.column_stack([mast_angles, np.zeros_like(mast_angles), np.zeros_like(mast_angles), y_lin])
+
 
 def do_AMTGMscan_supervised(params, ref_file: str):
     """
@@ -905,25 +908,28 @@ def do_AMTGMscan_supervised(params, ref_file: str):
     out = TimeGating.tgm_supervised(responses, freq_list, ref_on_grid, f0_list=None,
                                     taper_edge=True, tukey_alpha=0.5, N_fft=None)
     tgm_db = out["pattern_db"].astype(float)
-    gate = out["gate"]
+    gate   = out["gate"]
     print(f"[Supervised TGM] t1={gate[0]*1e9:.2f} ns, t2={gate[1]*1e9:.2f} ns, width={(gate[1]-gate[0])*1e9:.2f} ns")
     print(f"RMSE: before={out['rmse_before']:.2f} dB  after={out['rmse_after']:.2f} dB")
 
-    # Plot
     try:
         plot_polar_patterns(
             mast_angles,
-            traces=[("Reference (anechoic)", ref_on_grid), ("TGM (supervised)", tgm_db)],
+            traces=[("Reference (anechoic)", ref_on_grid),
+                    ("TGM (supervised)", tgm_db)],
             rmin=-60.0, rmax=0.0, rticks=(-60,-40,-20,0),
             title="Radiation Pattern (NEW TGM, supervised)"
-        )
-        plot_patterns(mast_angles, traces=[("Reference", ref_on_grid), ("TGM (supervised)", tgm_db)],
+            )
+        plot_patterns(mast_angles,
+                      traces=[("Reference", ref_on_grid),
+                              ("TGM (supervised)", tgm_db)],
                       title="Radiation Pattern (NEW TGM, supervised)")
     except Exception:
         pass
 
- 
-    return mast_angles.tolist(), tgm_db.tolist()
+    # Return single ndarray (linear, normalized)
+    y_lin = 10.0 ** (tgm_db / 20.0)
+    return np.column_stack([mast_angles, np.zeros_like(mast_angles), np.zeros_like(mast_angles), y_lin])
 
 def _ensure_tuple_result(res):
     """
